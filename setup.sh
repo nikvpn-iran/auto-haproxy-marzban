@@ -1,107 +1,96 @@
 #!/bin/bash
 
-# مشخص کردن رنگ‌ها برای زیبایی خروجی
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-RED='\033[0;31m'
 NC='\033[0m'
 
 echo -e "${GREEN}====================================================${NC}"
-echo -e "${YELLOW}  Marzban All-on-One-Port (HAProxy) Auto Setup${NC}"
+echo -e "${YELLOW} Marzban HAProxy Setup (Ports Only & Identical .env)${NC}"
 echo -e "${GREEN}====================================================${NC}"
-echo ""
 
-# مرحله 1: دریافت اطلاعات از کاربر
-read -p "Enter Panel & Subscription Domain (e.g., panel.example.com): " PANEL_DOMAIN
-read -p "Enter REALITY SNI Domain (e.g., reality.com): " REALITY_DOMAIN
+# ۱. آپدیت پکیج‌ها و نصب HAProxy
+echo -e "${YELLOW}Updating system and installing HAProxy...${NC}"
+apt-get update -y && apt-get upgrade -y
+apt install -y haproxy[cite: 2]
 
-read -p "Enter Local Panel Port [Default: 10000]: " PANEL_PORT
+# ۲. دریافت پورت‌ها از کاربر
+read -p "Enter Panel Local Port [Default: 10000]: " PANEL_PORT
 PANEL_PORT=${PANEL_PORT:-10000}
 
-read -p "Enter Local Fallback Port (for TLS Configs) [Default: 11000]: " FALLBACK_PORT
-FALLBACK_PORT=${FALLBACK_PORT:-11000}
-
-read -p "Enter Local REALITY Port [Default: 12000]: " REALITY_PORT
+read -p "Enter Reality Local Port [Default: 12000]: " REALITY_PORT
 REALITY_PORT=${REALITY_PORT:-12000}
 
-echo -e "\n${YELLOW}Installing HAProxy...${NC}"
-# مرحله 2: نصب پیش‌نیازها
-apt-get update
-apt-get install -y haproxy
+read -p "Enter Reality GRPC Local Port [Default: 12200]: " REALITY_GRPC_PORT
+REALITY_GRPC_PORT=${REALITY_GRPC_PORT:-12200}
 
-# بک‌آپ‌گیری از کانفیگ فعلی HAProxy
-if [ -f /etc/haproxy/haproxy.cfg ]; then
-    cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.bak
-    echo -e "${GREEN}Backup of existing HAProxy config created.${NC}"
-fi
+read -p "Enter Fallback Local Port [Default: 11000]: " FALLBACK_PORT
+FALLBACK_PORT=${FALLBACK_PORT:-11000}
 
-echo -e "\n${YELLOW}Configuring HAProxy...${NC}"
-# مرحله 3: ایجاد فایل پیکربندی HAProxy
+read -p "Enter Your Current Port for Sfront (Subscription) [Default: 8080]: " CURRENT_PORT
+CURRENT_PORT=${CURRENT_PORT:-8080}
+
+# ۳. ایجاد فایل کانفیگ HAProxy با پورت‌های جدید و SNIهای ثابت[cite: 2]
+echo -e "${YELLOW}Configuring /etc/haproxy/haproxy.cfg...${NC}"
 cat <<EOF > /etc/haproxy/haproxy.cfg
 listen front
-    mode tcp
-    bind *:443
-    tcp-request inspect-delay 5s
-    tcp-request content accept if { req_ssl_hello_type 1 }
-    
-    # Routing based on SNI
-    use_backend panel if { req.ssl_sni -m end $PANEL_DOMAIN }
-    use_backend reality if { req.ssl_sni -m end $REALITY_DOMAIN }
-    default_backend fallback
+ mode tcp
+ bind *:443
+
+ tcp-request inspect-delay 5s
+ tcp-request content accept if { req_ssl_hello_type 1 }
+
+ use_backend panel if { req.ssl_sni -m end yourpaneldomain.com }
+ use_backend reality if { req.ssl_sni -m end FirstSNI }
+ use_backend realitygrpc if { req.ssl_sni -m end SecondSNI }
+ default_backend fallback
 
 backend panel
-    mode tcp
-    server srv1 127.0.0.1:$PANEL_PORT
-
-backend fallback
-    mode tcp
-    server srv1 127.0.0.1:$FALLBACK_PORT
+ mode tcp
+ server srv1 127.0.0.1:$PANEL_PORT
 
 backend reality
-    mode tcp
-    server srv1 127.0.0.1:$REALITY_PORT send-proxy
+ mode tcp
+ server srv1 127.0.0.1:$REALITY_PORT send-proxy
+
+backend realitygrpc
+ mode tcp
+ server srv1 127.0.0.1:$REALITY_GRPC_PORT
+
+backend fallback
+ mode tcp
+ server srv1 127.0.0.1:$FALLBACK_PORT
+
+listen sfront
+ mode tcp
+ bind *:$CURRENT_PORT
+
+ tcp-request inspect-delay 5s
+ tcp-request content accept if { req_ssl_hello_type 1 }
+
+ use_backend sub if { req.ssl_sni -m end yourpaneldomain.com }
+
+backend sub
+ mode tcp
+ server srv1 127.0.0.1:$PANEL_PORT
 EOF
 
-echo -e "\n${YELLOW}Configuring Marzban .env...${NC}"
-# مرحله 4: ویرایش فایل .env مرزبان
-MARZBAN_ENV="/opt/marzban/.env"
-if [ -f "$MARZBAN_ENV" ]; then
-    # تغییر یا افزودن UVICORN_HOST
-    if grep -q "^UVICORN_HOST" "$MARZBAN_ENV"; then
-        sed -i 's/^UVICORN_HOST.*/UVICORN_HOST = "127.0.0.1"/' "$MARZBAN_ENV"
-    else
-        echo 'UVICORN_HOST = "127.0.0.1"' >> "$MARZBAN_ENV"
-    fi
+# ۴. یکسان‌سازی فایل .env مرزبان[cite: 2]
+echo -e "${YELLOW}Applying identical .env configurations...${NC}"
+ENV_FILE="/opt/marzban/.env"
 
-    # تغییر یا افزودن UVICORN_PORT
-    if grep -q "^UVICORN_PORT" "$MARZBAN_ENV"; then
-        sed -i "s/^UVICORN_PORT.*/UVICORN_PORT = $PANEL_PORT/" "$MARZBAN_ENV"
-    else
-        echo "UVICORN_PORT = $PANEL_PORT" >> "$MARZBAN_ENV"
+if [ -f "$ENV_FILE" ]; then
+    if ! grep -q "^XRAY_FALLBACKS_INBOUND_TAG" "$ENV_FILE"; then
+        echo 'XRAY_FALLBACKS_INBOUND_TAG = "TROJAN_FALLBACK_INBOUND"' >> "$ENV_FILE"[cite: 2]
     fi
-    echo -e "${GREEN}Marzban .env updated successfully.${NC}"
 else
-    echo -e "${RED}Warning: /opt/marzban/.env not found! Please update UVICORN settings manually.${NC}"
+    echo 'XRAY_FALLBACKS_INBOUND_TAG = "TROJAN_FALLBACK_INBOUND"' > "$ENV_FILE"[cite: 2]
 fi
 
-echo -e "\n${YELLOW}Restarting Services...${NC}"
-# مرحله 5: ریستارت سرویس‌ها
-systemctl restart haproxy
-systemctl enable haproxy
+# ۵. تست کانفیگ و ریستارت سرویس‌ها[cite: 2]
+echo -e "${YELLOW}Testing HAProxy config and restarting services...${NC}"
+haproxy -c -f /etc/haproxy/haproxy.cfg[cite: 2]
 
-if command -v marzban &> /dev/null; then
-    marzban restart
-else
-    echo -e "${RED}Warning: 'marzban' command not found. Please restart Marzban manually.${NC}"
-fi
+systemctl restart haproxy[cite: 2]
+marzban restart[cite: 2]
 
-echo -e "${GREEN}====================================================${NC}"
-echo -e "${GREEN} Setup Completed Successfully!${NC}"
-echo -e " HAProxy is now listening on port 443."
-echo -e "${YELLOW} IMPORTANT NEXT STEPS:${NC}"
-echo -e " 1. Go to Marzban Core Settings."
-echo -e " 2. Set your REALITY inbound 'listen' to 127.0.0.1 and port to $REALITY_PORT."
-echo -e " 3. Enable 'acceptProxyProtocol': true for REALITY."
-echo -e " 4. Setup your Fallback inbound on port $FALLBACK_PORT."
-echo -e " 5. Change ports to 443 in Marzban Host Settings."
-echo -e "${GREEN}====================================================${NC}"
+echo -e "${GREEN}Setup Completed! HAProxy and Marzban are running with updated ports.${NC}"
